@@ -2241,6 +2241,10 @@ Nim supports these `calling conventions`:idx:\:
     only a hint for the compiler: it may completely ignore it, and
     it may inline procedures that are not marked as `inline`.
 
+`noinline`:idx:
+:   The backend compiler may inline procedures that are not marked as `inline`.
+    The noinline convention prevents it.
+
 `fastcall`:idx:
 :   Fastcall means different things to different C compilers. One gets whatever
     the C `__fastcall` means.
@@ -2623,12 +2627,12 @@ In a call `p(args)` where `p` may refer to more than one
 candidate, it is said to be a symbol choice. Overload resolution will attempt to
 find the best candidate, thus transforming the symbol choice into a resolved symbol.
 The routine `p` that matches best is selected following a series of trials explained below. 
-In order: Catagory matching, Hierarchical Order Comparison, and finally, Complexity Analysis.
+In order: Category matching, Hierarchical Order Comparison, and finally, Complexity Analysis.
 
 If multiple candidates match equally well after all trials have been tested, the ambiguity 
 is reported during semantic analysis.
 
-First Trial: Catagory matching
+First Trial: Category matching
 --------------------------------
 
 Every arg in `args` needs to match and there are multiple different categories of matches.
@@ -2689,7 +2693,7 @@ Matching formals for this type include `T`, `object`, `A`, `A[...]` and `A[C]` w
 is a generic typeclass composition and `T` is an unconstrained generic type variable. This list is in order of 
 specificity with respect to `A` as each subsequent category narrows the set of types that are members of their match set.
 
-In this trail, the formal parameters of candidates are compared in order (1st parameter, 2nd parameter, etc.) to search for
+In this trial, the formal parameters of candidates are compared in order (1st parameter, 2nd parameter, etc.) to search for
 a candidate that has an unrivaled specificity. If such a formal parameter is found, the candidate it belongs to is chosen 
 as the resolved symbol.
 
@@ -5169,7 +5173,7 @@ It is possible to raise/catch imported C++ exceptions. Types imported using
 `importcpp` can be raised or caught. Exceptions are raised by value and
 caught by reference. Example:
 
-  ```nim  test = "nim cpp -r $1"
+  ```nim
   type
     CStdException {.importcpp: "std::exception", header: "<exception>", inheritable.} = object
       ## does not inherit from `RootObj`, so we use `inheritable` instead
@@ -6260,7 +6264,7 @@ The default for symbols of entity `type`, `var`, `let` and `const`
 is `gensym`. For `proc`, `iterator`, `converter`, `template`,
 `macro`, the default is `inject`, but if a `gensym` symbol with the same name
 is defined in the same syntax-level scope, it will be `gensym` by default.
-This can be overriden by marking the routine as `inject`. 
+This can be overridden by marking the routine as `inject`. 
 
 If the name of the entity is passed as a template parameter, it is an `inject`'ed symbol:
 
@@ -8646,6 +8650,14 @@ pragma should be used in addition to the `exportc` pragma. See
 [Dynlib pragma for export].
 
 
+Exportcpp pragma
+----------------
+The `exportcpp` pragma works like the `exportc` pragma but it requires the `cpp` backend.
+When compiled with the `cpp` backend, the `exportc` pragma adds `export "C"` to
+the declaration in the generated code so that it can be called from both C and
+C++ code. `exportcpp` pragma doesn't add `export "C"`.
+
+
 Extern pragma
 -------------
 Like `exportc` or `importc`, the `extern` pragma affects name
@@ -9031,3 +9043,119 @@ This means the following compiles (for now) even though it really should not:
     inc i
     access a[i].v
   ```
+
+Strict definitions and `out` parameters
+=======================================
+
+*every* local variable must be initialized explicitly before it can be used:
+
+  ```nim
+  proc test =
+    var s: seq[string]
+    s.add "abc" # invalid!
+  ```
+
+Needs to be written as:
+
+  ```nim
+  proc test =
+    var s: seq[string] = @[]
+    s.add "abc" # valid!
+  ```
+
+A control flow analysis is performed in order to prove that a variable has been written to
+before it is used. Thus the following is valid:
+
+  ```nim
+  proc test(cond: bool) =
+    var s: seq[string]
+    if cond:
+      s = @["y"]
+    else:
+      s = @[]
+    s.add "abc" # valid!
+  ```
+
+In this example every path does set `s` to a value before it is used.
+
+  ```nim
+  proc test(cond: bool) =
+    let s: seq[string]
+    if cond:
+      s = @["y"]
+    else:
+      s = @[]
+  ```
+
+`let` statements are allowed to not have an initial value, but every path should set `s` to a value before it is used.
+
+
+`out` parameters
+----------------
+
+An `out` parameter is like a `var` parameter but it must be written to before it can be used:
+
+  ```nim
+  proc myopen(f: out File; name: string): bool =
+    f = default(File)
+    result = open(f, name)
+  ```
+
+While it is usually the better style to use the return type in order to return results API and ABI
+considerations might make this infeasible. Like for `var T` Nim maps `out T` to a hidden pointer.
+For example POSIX's `stat` routine can be wrapped as:
+
+  ```nim
+  proc stat*(a1: cstring, a2: out Stat): cint {.importc, header: "<sys/stat.h>".}
+  ```
+
+When the implementation of a routine with output parameters is analysed, the compiler
+checks that every path before the (implicit or explicit) return does set every output
+parameter:
+
+  ```nim
+  proc p(x: out int; y: out string; cond: bool) =
+    x = 4
+    if cond:
+      y = "abc"
+    # error: not every path initializes 'y'
+  ```
+
+
+Out parameters and exception handling
+-------------------------------------
+
+The analysis should take exceptions into account (but currently does not):
+
+  ```nim
+  proc p(x: out int; y: out string; cond: bool) =
+    x = canRaise(45)
+    y = "abc" # <-- error: not every path initializes 'y'
+  ```
+
+Once the implementation takes exceptions into account it is easy enough to
+use `outParam = default(typeof(outParam))` in the beginning of the proc body.
+
+Out parameters and inheritance
+------------------------------
+
+It is not valid to pass an lvalue of a supertype to an `out T` parameter:
+
+  ```nim
+  type
+    Superclass = object of RootObj
+      a: int
+    Subclass = object of Superclass
+      s: string
+
+  proc init(x: out Superclass) =
+    x = Superclass(a: 8)
+
+  var v: Subclass
+  init v
+  use v.s # the 's' field was never initialized!
+  ```
+
+However, in the future this could be allowed and provide a better way to write object
+constructors that take inheritance into account.
+
